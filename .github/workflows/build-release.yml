@@ -49,7 +49,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: universal-apple-darwin, bundles: "app,dmg", artifact: mac }
+          - { os: macos-latest, target: aarch64-apple-darwin, bundles: "app,dmg", artifact: mac }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, bundles: nsis, artifact: win }
     runs-on: ${{ matrix.os }}
     # A newer push replaces an older build still running; publishing below is never cancelled.
@@ -73,20 +73,15 @@ jobs:
       - name: Install the Rust toolchain named by rust-toolchain.toml
         shell: bash
         run: rustup toolchain install && rustup show active-toolchain && cargo clippy --version
+      # Workspace crates are cached too: pin-version bumps only cma-app, so the rest stay fresh.
       - uses: Swatinem/rust-cache@v2
-        with: { key: "${{ matrix.target }}" }
+        with: { key: "${{ matrix.target }}", cache-workspace-crates: true }
       - name: Pin build version
         run: node crates/app/ci/pin-version.mjs
       - name: Build the macOS sidecars
         if: runner.os == 'macOS'
         shell: bash
         run: bash scripts/build-sidecars.sh ${{ matrix.target }}
-      - name: Lint the workspace (Windows)
-        if: runner.os == 'Windows'
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test the workspace (Windows)
-        if: runner.os == 'Windows'
-        run: cargo test --workspace
       - name: Build the Tauri bundles
         working-directory: crates/app
         shell: bash
@@ -104,9 +99,9 @@ jobs:
           shopt -s nullglob; mkdir -p out; P="ClaudeCLIManager-$VERSION"
           stage() { local f=($1); [ ${#f[@]} -eq 1 ] || { echo "::error::$1 matched ${#f[@]} files, want 1"; exit 1; }; cp "${f[0]}" "out/$2"; }
           if [ "$RUNNER_OS" = macOS ]; then
-            stage "$B/dmg/*_${VERSION}_universal.dmg" "$P-universal.dmg"
-            stage "$B/macos/*.app.tar.gz" "$P-universal.app.tar.gz"
-            stage "$B/macos/*.app.tar.gz.sig" "$P-universal.app.tar.gz.sig"
+            stage "$B/dmg/*_${VERSION}_aarch64.dmg" "$P-aarch64.dmg"
+            stage "$B/macos/*.app.tar.gz" "$P-aarch64.app.tar.gz"
+            stage "$B/macos/*.app.tar.gz.sig" "$P-aarch64.app.tar.gz.sig"
           else
             stage "$B/nsis/*_${VERSION}_x64-setup.exe" "$P-x64-setup.exe"
             stage "$B/nsis/*_${VERSION}_x64-setup.exe.sig" "$P-x64-setup.exe.sig"
@@ -115,8 +110,31 @@ jobs:
       - uses: actions/upload-artifact@v7
         with: { name: "${{ matrix.artifact }}", path: out/*, if-no-files-found: error, retention-days: 1 }
 
+  # Windows lint and test run beside the bundle builds: they still gate the release, without delaying it.
+  check:
+    needs: prepare
+    runs-on: windows-latest
+    concurrency: { group: release-check, cancel-in-progress: true }
+    steps:
+      - name: Checkout private source
+        uses: actions/checkout@v7
+        with: { repository: namds666/claude-cli-manager-src, ref: "${{ needs.prepare.outputs.sha }}", token: "${{ secrets.SRC_READ_PAT }}", persist-credentials: false }
+      - name: Exclude build dirs from Defender
+        continue-on-error: true
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE", "$env:RUNNER_TEMP", "$env:USERPROFILE\.cargo"
+      - name: Install the Rust toolchain named by rust-toolchain.toml
+        shell: bash
+        run: rustup toolchain install && rustup show active-toolchain && cargo clippy --version
+      - uses: Swatinem/rust-cache@v2
+        with: { key: check-x86_64-pc-windows-msvc, cache-workspace-crates: true }
+      - name: Lint the workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test the workspace
+        run: cargo test --workspace
+
   release:
-    needs: [prepare, build]
+    needs: [prepare, build, check]
     runs-on: ubuntu-latest
     concurrency: { group: release-publish, cancel-in-progress: false }
     env:
@@ -135,15 +153,15 @@ jobs:
           P="ClaudeCLIManager-$VERSION"; BASE="$REPO_URL/releases/download/v$VERSION"
           node src/scripts/gen-latest-yml.mjs "artifacts/ClaudeCLIManager-$VERSION-x64-setup.exe" "$VERSION" "ClaudeCLIManager-$VERSION-x64-setup.exe" > artifacts/latest.yml
           jq -n --arg v "$VERSION" --arg notes "$REPO_URL/releases/tag/v$VERSION" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg mac_sig "$(tr -d '\r\n' < "artifacts/$P-universal.app.tar.gz.sig")" --arg mac_url "$BASE/$P-universal.app.tar.gz" \
+            --arg mac_sig "$(tr -d '\r\n' < "artifacts/$P-aarch64.app.tar.gz.sig")" --arg mac_url "$BASE/$P-aarch64.app.tar.gz" \
             --arg win_sig "$(tr -d '\r\n' < "artifacts/$P-x64-setup.exe.sig")" --arg win_url "$BASE/$P-x64-setup.exe" \
             '{version: $v, notes: $notes, pub_date: $date, platforms: {"darwin-aarch64": {signature: $mac_sig, url: $mac_url},
-              "darwin-x86_64": {signature: $mac_sig, url: $mac_url}, "windows-x86_64": {signature: $win_sig, url: $win_url}}}' > artifacts/latest.json
+              "windows-x86_64": {signature: $win_sig, url: $win_url}}}' > artifacts/latest.json
       - name: Assert the release asset set
         working-directory: artifacts
         run: |
           P="ClaudeCLIManager-$VERSION"
-          WANT=$(printf '%s\n' "$P-universal.dmg" "$P-universal.app.tar.gz" "$P-universal.app.tar.gz.sig" \
+          WANT=$(printf '%s\n' "$P-aarch64.dmg" "$P-aarch64.app.tar.gz" "$P-aarch64.app.tar.gz.sig" \
             "$P-x64-setup.exe" "$P-x64-setup.exe.sig" latest.json latest.yml | LC_ALL=C sort)
           [ "$(ls -A | LC_ALL=C sort)" = "$WANT" ] || { echo "::error::release assets differ from the expected 7:" $(ls -A); exit 1; }
           [ "$(ls *.dmg | wc -l)" -eq 1 ] || { echo "::error::the release must carry exactly one .dmg"; exit 1; }
@@ -173,7 +191,7 @@ jobs:
             echo "$CHANGES"
             echo
             echo "## Install"
-            echo "**macOS (Apple Silicon and Intel):**"
+            echo "**macOS (Apple Silicon):**"
             echo "1. Download the **.dmg** below, open it, and drag the app into **Applications**."
             echo "2. **First open:** macOS blocks it (unsigned). macOS 15 or later: try to open it once, then **System Settings → Privacy & Security → Open Anyway**. macOS 14 or earlier: right-click the app → **Open → Open**. After that it opens normally."
             echo
