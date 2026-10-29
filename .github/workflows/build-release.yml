@@ -41,7 +41,7 @@ jobs:
       - name: Check the sign-in secrets are set
         run: |
           [ "${{ secrets['CCM_AUTH_URL'] != '' && secrets['CCM_GOOGLE_CLIENT_ID'] != '' && secrets['CCM_GOOGLE_CLIENT_SECRET'] != '' }}" = true ] \
-            || { echo "::error::set CCM_AUTH_URL, CCM_GOOGLE_CLIENT_ID and CCM_GOOGLE_CLIENT_SECRET as repo secrets (same values as Claude Desktop Manager's); a build without them locks every user out"; exit 1; }
+            || { echo "::error::set CCM_AUTH_URL, CCM_GOOGLE_CLIENT_ID and CCM_GOOGLE_CLIENT_SECRET as repo secrets; a build without them locks every user out"; exit 1; }
 
   build:
     needs: prepare
@@ -88,9 +88,9 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          CDM_AUTH_URL: ${{ secrets.CCM_AUTH_URL }}
-          CDM_GOOGLE_CLIENT_ID: ${{ secrets.CCM_GOOGLE_CLIENT_ID }}
-          CDM_GOOGLE_CLIENT_SECRET: ${{ secrets.CCM_GOOGLE_CLIENT_SECRET }}
+          CCM_AUTH_URL: ${{ secrets.CCM_AUTH_URL }}
+          CCM_GOOGLE_CLIENT_ID: ${{ secrets.CCM_GOOGLE_CLIENT_ID }}
+          CCM_GOOGLE_CLIENT_SECRET: ${{ secrets.CCM_GOOGLE_CLIENT_SECRET }}
         run: npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - name: Stage the bundles under their published names
         shell: bash
