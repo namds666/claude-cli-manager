@@ -42,6 +42,11 @@ jobs:
         run: |
           [ "${{ secrets['CCM_AUTH_URL'] != '' && secrets['CCM_GOOGLE_CLIENT_ID'] != '' && secrets['CCM_GOOGLE_CLIENT_SECRET'] != '' }}" = true ] \
             || { echo "::error::set CCM_AUTH_URL, CCM_GOOGLE_CLIENT_ID and CCM_GOOGLE_CLIENT_SECRET as repo secrets; a build without them locks every user out"; exit 1; }
+      # An ad-hoc signature changes with every byte, so macOS drops dtach's privacy grants on each update.
+      - name: Check the macOS signing secrets are set
+        run: |
+          [ "${{ secrets['MAC_SIGN_P12'] != '' && secrets['MAC_SIGN_P12_PASSWORD'] != '' }}" = true ] \
+            || { echo "::error::set MAC_SIGN_P12 and MAC_SIGN_P12_PASSWORD as repo secrets; an ad-hoc build resets every macOS privacy grant"; exit 1; }
 
   build:
     needs: prepare
@@ -56,6 +61,8 @@ jobs:
     concurrency: { group: "release-build-${{ matrix.artifact }}", cancel-in-progress: true }
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      MAC_SIGN_IDENTITY: Claude CLI Manager Code Signing
+      MAC_SIGN_ROOT: 22558dad03226559b39a954c43fd6fa77abf0357
     steps:
       - name: Checkout private source
         uses: actions/checkout@v7
@@ -82,6 +89,25 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: bash scripts/build-sidecars.sh ${{ matrix.target }}
+      # The fixed self-signed certificate makes the designated requirement "identifier and certificate root",
+      # so macOS keeps the app's and dtach's privacy grants across updates. Untrusted is fine for codesign.
+      - name: Import the macOS signing certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MAC_SIGN_P12: ${{ secrets.MAC_SIGN_P12 }}
+          MAC_SIGN_P12_PASSWORD: ${{ secrets.MAC_SIGN_P12_PASSWORD }}
+        run: |
+          KC="$RUNNER_TEMP/sign.keychain-db"; KP=$(openssl rand -hex 16); P12="$RUNNER_TEMP/sign.p12"
+          printf '%s' "$MAC_SIGN_P12" | base64 --decode > "$P12"
+          security create-keychain -p "$KP" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KP" "$KC"
+          security import "$P12" -k "$KC" -P "$MAC_SIGN_P12_PASSWORD" -T /usr/bin/codesign >/dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$P12"
+          security find-identity -p codesigning "$KC" | grep -q "$MAC_SIGN_IDENTITY" || { echo "::error::the signing identity is not in the keychain"; exit 1; }
       - name: Build the Tauri bundles
         working-directory: crates/app
         shell: bash
@@ -91,7 +117,18 @@ jobs:
           CCM_AUTH_URL: ${{ secrets.CCM_AUTH_URL }}
           CCM_GOOGLE_CLIENT_ID: ${{ secrets.CCM_GOOGLE_CLIENT_ID }}
           CCM_GOOGLE_CLIENT_SECRET: ${{ secrets.CCM_GOOGLE_CLIENT_SECRET }}
-        run: npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        run: |
+          [ "$RUNNER_OS" != macOS ] || export APPLE_SIGNING_IDENTITY="$MAC_SIGN_IDENTITY"
+          npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - name: Check the app and dtach carry the fixed certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          shopt -s nullglob; APP=(target/${{ matrix.target }}/release/bundle/macos/*.app)
+          for f in "${APP[0]}" "${APP[0]}/Contents/MacOS/dtach" "${APP[0]}/Contents/MacOS/claude-office"; do
+            codesign -d -r- "$f" 2>&1 | grep -q "certificate root = H\"$MAC_SIGN_ROOT\"" \
+              || { echo "::error::$f is not signed with the fixed certificate"; codesign -d -r- "$f"; exit 1; }
+          done
       - name: Stage the bundles under their published names
         shell: bash
         env: { B: "target/${{ matrix.target }}/release/bundle" }
