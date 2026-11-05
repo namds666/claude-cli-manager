@@ -1,0 +1,38 @@
+name: Windows check
+# Test-only Windows lint and test at a source sha: no bundle, no release. Dispatched by hand or by a gate.
+on:
+  workflow_dispatch:
+    inputs:
+      sha: { description: "Source commit SHA to check", required: true, type: string }
+run-name: Windows check ${{ inputs.sha }}
+permissions: { contents: read }
+concurrency: { group: windows-check, cancel-in-progress: false }
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check the sha
+        shell: bash
+        env: { SHA: "${{ inputs.sha }}" }
+        run: '[[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a 40-hex lowercase commit id"; exit 1; }'
+      - name: Checkout private source
+        uses: actions/checkout@v7
+        with: { repository: namds666/claude-cli-manager-src, ref: "${{ inputs.sha }}", token: "${{ secrets.SRC_READ_PAT }}", persist-credentials: false }
+      - name: Exclude build dirs from Defender
+        continue-on-error: true
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE", "$env:RUNNER_TEMP", "$env:USERPROFILE\.cargo"
+      - name: Install the Rust toolchain named by rust-toolchain.toml
+        shell: bash
+        run: rustup toolchain install && rustup show active-toolchain && cargo clippy --version
+      - uses: Swatinem/rust-cache@v2
+        with: { key: check-x86_64-pc-windows-msvc, cache-workspace-crates: true }
+      - name: Build the Windows sidecar
+        shell: bash
+        run: bash scripts/build-sidecars.sh x86_64-pc-windows-msvc
+      - name: Lint the workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test the workspace
+        run: cargo test --workspace

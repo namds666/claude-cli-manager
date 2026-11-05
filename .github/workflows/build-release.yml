@@ -85,8 +85,7 @@ jobs:
         with: { key: "${{ matrix.target }}", cache-workspace-crates: true }
       - name: Pin build version
         run: node crates/app/ci/pin-version.mjs
-      - name: Build the macOS sidecars
-        if: runner.os == 'macOS'
+      - name: Build the sidecars
         shell: bash
         run: bash scripts/build-sidecars.sh ${{ matrix.target }}
       # The fixed self-signed certificate makes the designated requirement "identifier and certificate root",
@@ -165,6 +164,10 @@ jobs:
         run: rustup toolchain install && rustup show active-toolchain && cargo clippy --version
       - uses: Swatinem/rust-cache@v2
         with: { key: check-x86_64-pc-windows-msvc, cache-workspace-crates: true }
+      # cma-app's build.rs fails while an externalBin file is missing.
+      - name: Build the Windows sidecar
+        shell: bash
+        run: bash scripts/build-sidecars.sh x86_64-pc-windows-msvc
       - name: Lint the workspace
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test the workspace
